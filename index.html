@@ -1,0 +1,260 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Notepad Online</title>
+  <style>
+    :root{--maxw:1000px;--accent:#1976d2}
+    body{font-family:Inter,Arial,Helvetica,sans-serif;margin:0;background:#f4f7fb;color:#222}
+    header{background:#fff;border-bottom:1px solid #e6ecf3;padding:18px 12px}
+    .container{max-width:var(--maxw);margin:28px auto;padding:0 12px}
+    h1{margin:0 0 10px;font-size:20px}
+    .card{background:#fff;padding:18px;border-radius:6px;box-shadow:0 1px 0 rgba(0,0,0,0.03)}
+    .row{display:flex;gap:8px;align-items:center}
+    input[type="text"]{padding:10px;border:1px solid #ddd;border-radius:4px;font-size:14px;flex:1}
+    button{background:var(--accent);color:#fff;border:none;padding:10px 12px;border-radius:4px;cursor:pointer}
+    button.secondary{background:#eee;color:#333}
+    textarea{width:100%;height:60vh;box-sizing:border-box;border:1px solid #ddd;padding:12px;border-radius:6px;font-family:monospace;font-size:14px;resize:vertical}
+    .muted{color:#666;font-size:13px}
+    .status{font-size:13px;color:#666;margin-top:8px}
+    .topline{display:flex;justify-content:space-between;align-items:center}
+    a.link{color:var(--accent);text-decoration:none}
+    footer{max-width:var(--maxw);margin:20px auto;padding:0 12px;color:#666;font-size:13px}
+    @media(max-width:640px){ textarea{height:50vh} }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="container topline">
+      <div><strong>Notepad Online</strong></div>
+      <div class="muted">Salve notas na nuvem — compartilhe por link</div>
+    </div>
+  </header>
+
+  <main class="container">
+    <div id="create-screen" class="card" style="display:none">
+      <h1>Criar ou abrir Notepad</h1>
+      <p class="muted">Escolha um código (a-z, 0-9, hífen). Ex.: <code>sixe03</code></p>
+      <div style="margin-top:12px" class="row">
+        <span style="background:#f9fafb;padding:10px;border:1px solid #eee;border-radius:4px;color:#666">/notepad/</span>
+        <input id="slug-input" type="text" value="">
+        <button id="create-btn">OK</button>
+      </div>
+      <div id="create-msg" class="status"></div>
+    </div>
+
+    <div id="editor-screen" style="display:none">
+      <div class="card">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <div>
+            <h1 id="note-title"></h1>
+            <div class="muted" id="share-url"></div>
+          </div>
+          <div>
+            <button id="download-btn" class="secondary">Baixar .txt</button>
+            <button id="clear-btn" class="secondary">Limpar</button>
+            <button id="copylink-btn" class="secondary">Copiar link</button>
+          </div>
+        </div>
+
+        <div style="margin-top:12px">
+          <textarea id="editor" placeholder="Digite suas notas aqui..."></textarea>
+          <div id="status" class="status">Carregando...</div>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <footer>
+    <div class="container">Dica: use slugs longos para dificultar que outras pessoas encontrem sua nota. Para produção considere autenticação.</div>
+  </footer>
+
+  <!-- IMPORTS do Firebase (modular) -->
+  <script type="module">
+  // Imports (versão usada: 9.x) — funciona em Netlify / GitHub Pages
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/9.22.1/firebase-app.js";
+  import { getFirestore, doc, getDoc, setDoc, onSnapshot, serverTimestamp } from "https://www.gstatic.com/firebasejs/9.22.1/firebase-firestore.js";
+
+  // ======= COLE AQUI SUA CONFIG DO FIREBASE (pegar no console do Firebase ao criar app web) =======
+  const firebaseConfig = {
+    apiKey: "AIzaSyCDBTgRyFAO2j2ygY1TE_ayobB0Y7YVmfU",
+    authDomain: "reidoslinks.firebaseapp.com",
+    projectId: "reidoslinks",
+    storageBucket: "reidoslinks.firebasestorage.app",
+    messagingSenderId: "256673386101",
+    appId: "1:256673386101:web:d490a0cae999831b9e323c"
+  };
+  // ===============================================================================================
+
+  // Inicializa
+  const app = initializeApp(firebaseConfig);
+  const db = getFirestore(app);
+
+  // DOM
+  const createScreen = document.getElementById('create-screen');
+  const editorScreen = document.getElementById('editor-screen');
+  const slugInput = document.getElementById('slug-input');
+  const createBtn = document.getElementById('create-btn');
+  const createMsg = document.getElementById('create-msg');
+
+  const editor = document.getElementById('editor');
+  const status = document.getElementById('status');
+  const noteTitle = document.getElementById('note-title');
+  const shareUrl = document.getElementById('share-url');
+  const downloadBtn = document.getElementById('download-btn');
+  const clearBtn = document.getElementById('clear-btn');
+  const copyLinkBtn = document.getElementById('copylink-btn');
+
+  // Helper: extrair slug da URL (espera path contendo /notepad/<slug>)
+  function getSlugFromPath(){
+    const path = location.pathname.replace(/\/+$/,''); // remove trailing slash
+    const parts = path.split('/');
+    // procura "notepad" na rota; se existir um segmento depois dele, é o slug
+    const idx = parts.lastIndexOf('notepad');
+    if(idx >= 0 && parts.length > idx + 1){
+      return parts[idx+1];
+    }
+    return null;
+  }
+
+  // Se usar /index.html?slug=xyz, também pega
+  function getSlugFromQuery(){
+    const qp = new URLSearchParams(location.search);
+    return qp.get('slug');
+  }
+
+  // decide screen
+  let slug = getSlugFromPath() || getSlugFromQuery();
+  if(!slug || slug === '' || slug.toLowerCase() === 'notepad'){
+    showCreate();
+  } else {
+    slug = slug.toLowerCase();
+    if(!/^[a-z0-9\-]{3,40}$/.test(slug)){
+      alert('Slug inválido. Use apenas a-z, 0-9 e hífen (3-40 chars).');
+      showCreate();
+    } else {
+      openEditor(slug);
+    }
+  }
+
+  // Mostrar tela criar
+  function showCreate(){
+    createScreen.style.display = 'block';
+    editorScreen.style.display = 'none';
+    slugInput.value = Math.random().toString(36).slice(2,8); // sugestão
+    createBtn.addEventListener('click', async ()=>{
+      let s = slugInput.value.trim().toLowerCase().replace(/[^a-z0-9\-]/g,'');
+      if(s.length < 3){ createMsg.textContent = 'Escolha pelo menos 3 caracteres.'; return; }
+      createMsg.textContent = 'Verificando...';
+      const docRef = doc(db, 'notes', s);
+      const snap = await getDoc(docRef);
+      if(snap.exists()){
+        createMsg.textContent = 'Esse código já existe. Escolha outro.';
+        return;
+      }
+      // cria doc vazio
+      await setDoc(docRef, { content: '', updatedAt: serverTimestamp() });
+      // redireciona para rota bonita (/notepad/<slug>)
+      const base = location.origin + '/notepad/' + encodeURIComponent(s);
+      // se estiver em SPA sem redirect do host, usa query param fallback
+      try {
+        history.pushState({}, '', '/notepad/' + s);
+      } catch(e){}
+      location.href = base;
+    });
+  }
+
+  // Abrir editor
+  async function openEditor(slugParam){
+    slug = slugParam;
+    createScreen.style.display = 'none';
+    editorScreen.style.display = 'block';
+    noteTitle.textContent = 'Notepad — ' + slug;
+    shareUrl.innerHTML = 'Link de compartilhamento: <a class="link" href="' + location.origin + '/notepad/' + slug + '">' + location.origin + '/notepad/' + slug + '</a>';
+
+    // referência doc
+    const docRef = doc(db, 'notes', slug);
+
+    // Carrega conteúdo inicial
+    const snap = await getDoc(docRef);
+    if(snap.exists()){
+      editor.value = snap.data().content || '';
+      status.textContent = 'Carregado';
+    } else {
+      // cria documento vazio para poder salvar depois
+      await setDoc(docRef, { content: '', updatedAt: serverTimestamp() });
+      editor.value = '';
+      status.textContent = 'Novo documento criado';
+    }
+
+    // sincronização em tempo real (recebe alterações feitas por outros)
+    let isTyping = false;
+    let typingTimer = null;
+    editor.addEventListener('input', ()=>{
+      isTyping = true;
+      status.textContent = 'Digitando...';
+      if(typingTimer) clearTimeout(typingTimer);
+      typingTimer = setTimeout(()=> { isTyping = false; }, 2000);
+      debounceSave();
+    });
+
+    // salva a cada 20s também
+    setInterval(()=>{ if(!isTyping) saveNow(); }, 20000);
+
+    // onSnapshot -> atualiza se remoto mudou e usuário não está digitando
+    onSnapshot(docRef, (docSnap)=>{
+      if(!docSnap.exists()) return;
+      const remote = docSnap.data().content || '';
+      if(!isTyping && remote !== editor.value){
+        editor.value = remote;
+        status.textContent = 'Sincronizado';
+      }
+    });
+
+    // --- debounce save ---
+    let saveTimer = null;
+    function debounceSave(){
+      if(saveTimer) clearTimeout(saveTimer);
+      saveTimer = setTimeout(saveNow, 1200);
+    }
+    async function saveNow(){
+      if(saveTimer){ clearTimeout(saveTimer); saveTimer = null; }
+      status.textContent = 'Salvando...';
+      try {
+        await setDoc(docRef, { content: editor.value, updatedAt: serverTimestamp() }, { merge: true });
+        const d = new Date();
+        status.textContent = 'Salvo às ' + d.toLocaleTimeString();
+      } catch(e){
+        status.textContent = 'Erro ao salvar';
+      }
+    }
+
+    // Botões utilitários
+    downloadBtn.addEventListener('click', ()=>{
+      const blob = new Blob([editor.value], { type: 'text/plain;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = slug + '.txt';
+      document.body.appendChild(a); a.click(); a.remove();
+      URL.revokeObjectURL(url);
+    });
+    clearBtn.addEventListener('click', async ()=>{
+      if(!confirm('Limpar todo o texto desta nota?')) return;
+      editor.value = '';
+      await setDoc(docRef, { content: '', updatedAt: serverTimestamp() }, { merge: true });
+      status.textContent = 'Vazio e salvo';
+    });
+    copyLinkBtn.addEventListener('click', ()=>{
+      navigator.clipboard.writeText(location.origin + '/notepad/' + slug).then(()=> {
+        copyLinkBtn.textContent = 'Copiado!';
+        setTimeout(()=> copyLinkBtn.textContent = 'Copiar link', 1200);
+      });
+    });
+
+  } // end openEditor
+
+  </script>
+</body>
+</html>
